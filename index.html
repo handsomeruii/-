@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>SU模型：单击选中后移动</title>
+  <style>
+    body { margin: 0; overflow: hidden; background-color: #f5f5f5; }
+    canvas { display: block; }
+    #ui-hint { 
+      position: absolute; top: 10px; left: 10px; 
+      background: rgba(0,0,0,0.7); color: white; 
+      padding: 12px; border-radius: 5px; font-size: 14px; 
+      pointer-events: none; line-height: 1.6;
+    }
+  </style>
+</head>
+<body>
+
+<div id="ui-hint">
+  <b>选中逻辑操作说明：</b><br>
+  • <b>鼠标左键单击</b>：选中/切换构件 (选中后会变红)<br>
+  • <b>左键拖拽</b>：仅限<b>已选中</b>的构件可以移动<br>
+  • <b>点击空白处</b>：取消当前选中<br>
+  • 键盘 [+] / [-]：缩放选中的构件
+</div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.158/build/three.module.js",
+    "three/examples/jsm/": "https://cdn.jsdelivr.net/npm/three@0.158/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { DragControls } from 'three/examples/jsm/controls/DragControls.js';
+
+// --- 1. 基础场景 ---
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xf5f5f5);
+const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+camera.position.set(15, 15, 15);
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setSize(window.innerWidth, window.innerHeight);
+document.body.appendChild(renderer.domElement);
+
+const controls = new OrbitControls(camera, renderer.domElement);
+const allModels = []; // 场景中所有的模型整体
+const activeSelection = []; // 传给 DragControls 的数组，初始为空
+
+// --- 2. 射线检测 (用于单击选中) ---
+const raycaster = new THREE.Raycaster();
+const mouse = new THREE.Vector2();
+
+// --- 3. 拖拽控制器 ---
+// 注意：这里初始绑定的数组是 activeSelection，它是空的
+const dragControls = new DragControls(activeSelection, camera, renderer.domElement);
+dragControls.transformGroup = true;
+
+dragControls.addEventListener('dragstart', () => controls.enabled = false);
+dragControls.addEventListener('dragend', () => controls.enabled = true);
+dragControls.addEventListener('drag', (event) => {
+    const snap = 0.5;
+    event.object.position.x = Math.round(event.object.position.x / snap) * snap;
+    event.object.position.z = Math.round(event.object.position.z / snap) * snap;
+});
+
+// --- 4. 🚀 单击选中逻辑 ---
+window.addEventListener('click', (event) => {
+    // 将鼠标位置归一化
+    mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+
+    raycaster.setFromCamera(mouse, camera);
+
+    // 检测点击到了哪些物体
+    const intersects = raycaster.intersectObjects(allModels, true);
+
+    if (intersects.length > 0) {
+        // 寻找到点击部位所属的顶级模型组 (Scene/Group)
+        let object = intersects[0].object;
+        while (object.parent && !allModels.includes(object)) {
+            object = object.parent;
+        }
+
+        // 如果点中了模型
+        if (allModels.includes(object)) {
+            selectObject(object);
+        }
+    } else {
+        // 点击空白处，清空选中
+        clearSelection();
+    }
+});
+
+function selectObject(model) {
+    clearSelection(); // 先重置之前的颜色
+    activeSelection.push(model); // 加入拖拽名单
+    
+    // 视觉反馈：变为红色边缘高亮
+    model.traverse(child => {
+        if(child.isMesh) {
+            child.material.emissive.set(0xff0000);
+            child.material.emissiveIntensity = 0.5;
+        }
+    });
+}
+
+function clearSelection() {
+    activeSelection.length = 0; // 清空拖拽名单
+    allModels.forEach(model => {
+        model.traverse(child => {
+            if(child.isMesh) child.material.emissive.set(0x000000);
+        });
+    });
+}
+
+// --- 5. 加载模型 ---
+const loader = new GLTFLoader();
+function loadModel(path, x, z) {
+    loader.load(path, (gltf) => {
+        const model = gltf.scene;
+        const box = new THREE.Box3().setFromObject(model);
+        model.position.set(x, -box.min.y, z);
+        scene.add(model);
+        allModels.push(model); // 加入总库
+    });
+}
+
+loadModel('./model/1.glb', 0, 0);
+loadModel('./model/1.glb', 5, 5);
+
+// --- 6. 辅助与渲染 ---
+scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+scene.add(new THREE.GridHelper(30, 30));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1);
+dirLight.position.set(10, 20, 10);
+scene.add(dirLight);
+
+window.addEventListener('keydown', (e) => {
+    if (activeSelection.length > 0) {
+        if (e.key === '+' || e.key === '=') activeSelection[0].scale.multiplyScalar(1.1);
+        if (e.key === '-' || e.key === '_') activeSelection[0].scale.divideScalar(1.1);
+    }
+});
+
+function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    renderer.render(scene, camera);
+}
+animate();
+
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+</script>
+
+</body>
+</html>
