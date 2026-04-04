@@ -2,46 +2,56 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
-  <title>极致流畅-3D演示</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>3D构件全向移动版</title>
   <style>
-    /* 核心修复：禁止浏览器干扰手势 */
     * { touch-action: none; -webkit-tap-highlight-color: transparent; }
-    body { margin: 0; overflow: hidden; background-color: #1a1a1a; }
-    canvas { display: block; outline: none; }
+    body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: sans-serif; }
+    canvas { display: block; }
 
-    /* UI 悬浮窗保持不穿透 */
-    .ui-overlay {
-      position: absolute; pointer-events: none;
-      color: rgba(255,255,255,0.6); font-size: 11px;
-      width: 100%; text-align: center; top: 10px; z-index: 100;
+    /* 顶部提示 */
+    .ui-tips {
+      position: absolute; top: 10px; width: 100%; text-align: center;
+      color: #aaa; font-size: 12px; pointer-events: none;
     }
 
-    .btn-group {
+    /* 右侧控制组 */
+    .control-box {
       position: absolute; bottom: 30px; right: 20px;
-      display: flex; flex-direction: column; gap: 15px;
-      pointer-events: auto; /* 允许点击按钮 */
+      display: flex; flex-direction: column; gap: 12px;
     }
 
     .btn {
-      width: 55px; height: 55px;
-      background: rgba(40, 40, 40, 0.8);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 50%; color: white; font-size: 20px;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      width: 50px; height: 50px;
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 12px; color: white; font-size: 20px;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      backdrop-filter: blur(10px);
     }
-    .btn:active { background: #ff3b30; transform: scale(0.92); }
+    .btn span { font-size: 10px; margin-top: 2px; }
+    .btn:active { background: #ff3b30; }
+
+    /* 选中提示标签 */
+    #select-tag {
+      position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
+      background: #ff3b30; color: white; padding: 4px 12px;
+      border-radius: 15px; font-size: 12px; display: none;
+    }
   </style>
 </head>
 <body>
 
-<div class="ui-overlay">流畅模式：单指旋转 | 双指缩放</div>
+<div class="ui-tips">拖拽：前后左右 | 按钮：升降、旋转、缩放</div>
+<div id="select-tag">已选中构件</div>
 
-<div class="btn-group">
-  <div class="btn" id="r-btn">↻</div>
-  <div class="btn" id="p-btn">＋</div>
-  <div class="btn" id="m-btn">－</div>
+<div class="control-box">
+  <div class="btn" id="up-btn">▲<span>升</span></div>
+  <div class="btn" id="down-btn">▼<span>降</span></div>
+  <hr style="width:100%; border:0; border-top:1px solid rgba(255,255,255,0.1)">
+  <div class="btn" id="rotate-btn">↻</div>
+  <div class="btn" id="plus-btn">＋</div>
+  <div class="btn" id="minus-btn">－</div>
 </div>
 
 <script type="importmap">
@@ -59,54 +69,47 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DragControls } from 'three/examples/jsm/controls/DragControls.js';
 
-// --- 1. 渲染器性能优化 ---
-const renderer = new THREE.WebGLRenderer({ 
-    antialias: true, 
-    powerPreference: "high-performance", // 强制高性能模式
-    precision: "mediump" // 移动端使用中等精度即可，极大提升帧率
-});
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); // 关键：限制渲染分辨率
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
-document.body.appendChild(renderer.domElement);
-
+// --- 场景初始化 ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
 camera.position.set(8, 8, 8);
 
-// --- 2. 丝滑视角控制 ---
+const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(window.innerWidth, window.innerHeight);
+renderer.outputColorSpace = THREE.SRGBColorSpace;
+document.body.appendChild(renderer.domElement);
+
 const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true; // 开启阻尼，滑动更平滑
-controls.dampingFactor = 0.08;
-controls.rotateSpeed = 0.7; // 稍微调低旋转速度，手感更稳
+controls.enableDamping = true;
 
 const allModels = [];
 const activeSelection = [];
 let currentObj = null;
 
-// --- 3. 拖拽逻辑 ---
+// --- 拖拽逻辑 (左右前后) ---
 const dragControls = new DragControls(activeSelection, camera, renderer.domElement);
 dragControls.transformGroup = true;
 
 dragControls.addEventListener('dragstart', () => controls.enabled = false);
 dragControls.addEventListener('dragend', () => controls.enabled = true);
 dragControls.addEventListener('drag', (e) => {
-    e.object.position.y = 0; // 强制保持在地面
-    const s = 0.2; // 更精细的对齐
+    // 自动吸附对齐 (0.2米为单位)
+    const s = 0.2;
     e.object.position.x = Math.round(e.object.position.x / s) * s;
     e.object.position.z = Math.round(e.object.position.z / s) * s;
+    // 注意：这里不再强制 y=0，允许保留之前调整的高度
 });
 
-// --- 4. 优化后的点击判定 ---
+// --- 点击选中逻辑 ---
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
-function onTouch(e) {
-    const x = e.touches ? e.touches[0].clientX : e.clientX;
-    const y = e.touches ? e.touches[0].clientY : e.clientY;
-    mouse.x = (x / window.innerWidth) * 2 - 1;
-    mouse.y = -(y / window.innerHeight) * 2 + 1;
+renderer.domElement.addEventListener('touchstart', (e) => {
+    const touch = e.touches[0];
+    mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
+    mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
     
     raycaster.setFromCamera(mouse, camera);
     const hits = raycaster.intersectObjects(allModels, true);
@@ -119,24 +122,46 @@ function onTouch(e) {
             activeSelection.length = 0;
             activeSelection.push(obj);
             currentObj = obj;
-            // 简单高亮
+            // 变色反馈
             allModels.forEach(m => m.traverse(c => c.isMesh && c.material.emissive?.set(0x000000)));
             obj.traverse(c => c.isMesh && c.material.emissive?.set(0x331111));
+            document.getElementById('select-tag').style.display = 'block';
+        }
+    } else {
+        if (!e.target.closest('.btn')) {
+            activeSelection.length = 0;
+            currentObj = null;
+            allModels.forEach(m => m.traverse(c => c.isMesh && c.material.emissive?.set(0x000000)));
+            document.getElementById('select-tag').style.display = 'none';
         }
     }
-}
-renderer.domElement.addEventListener('touchstart', onTouch, { passive: true });
+}, { passive: true });
 
-// --- 5. 按钮功能 ---
-document.getElementById('r-btn').onclick = () => currentObj && (currentObj.rotation.y += Math.PI/2);
-document.getElementById('p-btn').onclick = () => currentObj && currentObj.scale.multiplyScalar(1.1);
-document.getElementById('m-btn').onclick = () => currentObj && currentObj.scale.divideScalar(1.1);
+// --- 按钮功能：升降、旋转、缩放 ---
+const step = 0.2; // 每次移动/缩放的幅度
 
-// --- 6. 模型加载 ---
+document.getElementById('up-btn').onclick = () => {
+    if (currentObj) currentObj.position.y += step;
+};
+document.getElementById('down-btn').onclick = () => {
+    if (currentObj) currentObj.position.y -= step;
+};
+document.getElementById('rotate-btn').onclick = () => {
+    if (currentObj) currentObj.rotation.y += Math.PI / 2;
+};
+document.getElementById('plus-btn').onclick = () => {
+    if (currentObj) currentObj.scale.multiplyScalar(1.1);
+};
+document.getElementById('minus-btn').onclick = () => {
+    if (currentObj) currentObj.scale.divideScalar(1.1);
+};
+
+// --- 模型加载 ---
 const loader = new GLTFLoader();
 const load = (url, x, z) => {
     loader.load(url, (gltf) => {
         const m = gltf.scene;
+        // 初始落地位置
         const b = new THREE.Box3().setFromObject(m);
         m.position.set(x, -b.min.y, z);
         scene.add(m);
@@ -144,21 +169,22 @@ const load = (url, x, z) => {
     });
 };
 
+// 请修改为你对应的英文文件名
 load('./model/1.glb', 0, 0);
 load('./model/墙.glb', -3, 0);
 load('./model/柱.glb', -3, 0);
 load('./model/斗拱.glb', -3, 0);
 
-// --- 7. 灯光与循环 ---
+// --- 辅助线与灯光 ---
 scene.add(new THREE.AmbientLight(0xffffff, 1.5));
 const light = new THREE.DirectionalLight(0xffffff, 1);
 light.position.set(5, 10, 5);
 scene.add(light);
-scene.add(new THREE.GridHelper(20, 20, 0x333333, 0x222222));
+scene.add(new THREE.GridHelper(20, 20, 0x444444, 0x222222));
 
 function animate() {
     requestAnimationFrame(animate);
-    controls.update(); // 必须调用以实现阻尼效果
+    controls.update();
     renderer.render(scene, camera);
 }
 animate();
