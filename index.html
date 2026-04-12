@@ -3,34 +3,53 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>3D构件整体控制版</title>
+  <title>3D构件整体控制-带导出版</title>
   <style>
     * { touch-action: none; -webkit-tap-highlight-color: transparent; }
     body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: sans-serif; }
     canvas { display: block; }
 
-    .ui-tips { position: absolute; top: 10px; width: 100%; text-align: center; color: #aaa; font-size: 12px; pointer-events: none; z-index: 10; }
-    #select-tag { 
-      position: absolute; top: 40px; left: 50%; transform: translateX(-50%); 
-      background: #ff3b30; color: white; padding: 4px 15px; border-radius: 20px; 
-      font-size: 13px; display: none; z-index: 10; font-weight: bold;
+    /* UI 顶部提示 */
+    .ui-tips { position: absolute; top: 10px; width: 100%; text-align: center; color: #aaa; font-size: 11px; pointer-events: none; z-index: 10; }
+    
+    /* 核心：地址输入框 */
+    .address-bar {
+      position: absolute; top: 40px; left: 10px; right: 10px;
+      display: flex; gap: 5px; z-index: 20;
+    }
+    #save-path {
+      flex: 1; background: rgba(0,0,0,0.5); border: 1px solid #444; 
+      color: #0ff; padding: 8px; border-radius: 8px; font-size: 13px;
     }
 
+    /* 选中提示 */
+    #select-tag { 
+      position: absolute; top: 85px; left: 50%; transform: translateX(-50%); 
+      background: #ff3b30; color: white; padding: 4px 15px; border-radius: 20px; 
+      font-size: 12px; display: none; z-index: 10;
+    }
+
+    /* 左右控制组 */
     .system-box { position: absolute; bottom: 30px; left: 20px; display: flex; flex-direction: column; gap: 10px; }
     .control-box { position: absolute; bottom: 30px; right: 20px; display: flex; flex-direction: column; gap: 10px; }
 
     .btn {
       width: 55px; height: 55px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 15px; color: white; font-size: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; backdrop-filter: blur(10px);
+      border-radius: 15px; color: white; font-size: 16px; display: flex; flex-direction: column; align-items: center; justify-content: center; backdrop-filter: blur(10px);
     }
     .btn span { font-size: 10px; margin-top: 2px; }
-    .btn:active { background: #ff3b30; transform: scale(0.9); transition: 0.1s; }
     .btn-sys { background: rgba(0, 122, 255, 0.3); } 
+    .btn:active { transform: scale(0.9); background: #ff3b30; }
   </style>
 </head>
 <body>
 
-<div class="ui-tips">点选构件后：拖拽移动 | 按钮缩放旋转</div>
+<div class="ui-tips">输入文件名保存到本地 | 或输入 URL 发送到服务器</div>
+
+<div class="address-bar">
+  <input type="text" id="save-path" placeholder="输入保存文件名 (如: 我的屋顶1)" value="my_3d_project">
+</div>
+
 <div id="select-tag">已选中：构件整体</div>
 
 <div class="system-box">
@@ -63,7 +82,7 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DragControls } from 'three/examples/jsm/controls/DragControls.js';
 
-// --- 基础场景 ---
+// --- 初始化场景 ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -72,47 +91,36 @@ camera.position.set(10, 10, 10);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setPixelRatio(window.devicePixelRatio);
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.outputColorSpace = THREE.SRGBColorSpace;
 document.body.appendChild(renderer.domElement);
 
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-// --- 核心变量 ---
-const allComponents = []; // 存放每个GLB的根节点
-const activeSelection = []; // 传递给DragControls的数组
-let currentSelected = null; // 当前正在操作的对象
+// --- 变量 ---
+const allComponents = [];
+const activeSelection = [];
+let currentSelected = null;
 const historyStack = [];
 
-// --- 记录状态 (撤回功能) ---
+// --- 记录状态 (撤回) ---
 function recordState() {
     const state = allComponents.map(m => ({
-        uuid: m.uuid,
+        name: m.userData.cnName,
         pos: m.position.clone(),
         rot: m.rotation.clone(),
         sca: m.scale.clone()
     }));
     historyStack.push(state);
-    if (historyStack.length > 30) historyStack.shift();
+    if (historyStack.length > 20) historyStack.shift();
 }
 
-// --- 拖拽逻辑：整体变换 ---
+// --- 整体变换逻辑 ---
 const dragControls = new DragControls(activeSelection, camera, renderer.domElement);
-// 【关键修改1】：必须开启 transformGroup，否则拖动的是零件而不是整体
 dragControls.transformGroup = true; 
-
-dragControls.addEventListener('dragstart', () => {
-    recordState();
-    controls.enabled = false;
-});
+dragControls.addEventListener('dragstart', () => { recordState(); controls.enabled = false; });
 dragControls.addEventListener('dragend', () => controls.enabled = true);
-dragControls.addEventListener('drag', (e) => {
-    const s = 0.2; // 吸附步长
-    e.object.position.x = Math.round(e.object.position.x / s) * s;
-    e.object.position.z = Math.round(e.object.position.z / s) * s;
-});
 
-// --- 点击选中逻辑：向上追溯 ---
+// --- 点击选中 (向上追溯根节点) ---
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
@@ -120,96 +128,88 @@ renderer.domElement.addEventListener('touchstart', (e) => {
     const touch = e.touches[0];
     mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
-    
     raycaster.setFromCamera(mouse, camera);
     const intersects = raycaster.intersectObjects(allComponents, true);
 
     if (intersects.length > 0) {
-        // 【关键修改2】：向上递归寻找属于 allComponents 列表中的根节点
         let target = intersects[0].object;
-        while (target.parent && !allComponents.includes(target)) {
-            target = target.parent;
-        }
-
+        while (target.parent && !allComponents.includes(target)) target = target.parent;
         if (allComponents.includes(target)) {
             currentSelected = target;
             activeSelection.length = 0;
-            activeSelection.push(target); // 让DragControls知道现在要拖谁
-
-            // 高亮效果
-            allComponents.forEach(m => m.traverse(node => {
-                if(node.isMesh) node.material.emissive?.set(0x000000);
-            }));
-            target.traverse(node => {
-                if(node.isMesh) node.material.emissive?.set(0x221111);
-            });
-            
-            document.getElementById('select-tag').innerText = "已选中：" + (target.userData.cnName || "构件");
+            activeSelection.push(target);
+            allComponents.forEach(m => m.traverse(n => n.isMesh && n.material.emissive?.set(0x000000)));
+            target.traverse(n => n.isMesh && n.material.emissive?.set(0x221111));
+            document.getElementById('select-tag').innerText = "选中：" + target.userData.cnName;
             document.getElementById('select-tag').style.display = 'block';
         }
-    } else {
-        if (!e.target.closest('.btn')) {
-            currentSelected = null;
-            activeSelection.length = 0;
-            allComponents.forEach(m => m.traverse(node => {
-                if(node.isMesh) node.material.emissive?.set(0x000000);
-            }));
-            document.getElementById('select-tag').style.display = 'none';
-        }
+    } else if (!e.target.closest('.btn') && !e.target.closest('input')) {
+        currentSelected = null;
+        activeSelection.length = 0;
+        allComponents.forEach(m => m.traverse(n => n.isMesh && n.material.emissive?.set(0x000000)));
+        document.getElementById('select-tag').style.display = 'none';
     }
 }, { passive: true });
 
-// --- 加载函数：保持独立整体 ---
+// --- 加载构件 ---
 const loader = new GLTFLoader();
 const loadComponent = (url, cnName) => {
     loader.load(url, (gltf) => {
         const root = gltf.scene;
         root.userData.cnName = cnName;
-        
-        // 自动居中逻辑（可选，如果你的模型导出时偏离中心很远，请取消注释）
-        // const box = new THREE.Box3().setFromObject(root);
-        // const center = box.getCenter(new THREE.Vector3());
-        // root.children.forEach(c => c.position.sub(center));
-
         scene.add(root);
         allComponents.push(root);
-
-        // 尝试恢复保存位置
-        const savedData = JSON.parse(localStorage.getItem('layout_save_v2'));
-        if (savedData) {
-            const myData = savedData.find(d => d.name === cnName);
-            if (myData) {
-                root.position.copy(myData.pos);
-                root.rotation.set(myData.rot._x, myData.rot._y, myData.rot._z);
-                root.scale.copy(myData.sca);
-            }
-        }
     });
 };
 
-// 加载你的模型
 loadComponent('./model/1.glb', '屋顶整体');
 loadComponent('./model/wall.glb', '墙体整体');
 loadComponent('./model/pillar.glb', '柱子整体');
 loadComponent('./model/dougong.glb', '斗拱整体');
 
-// --- 按钮功能 ---
+// --- 核心修改：保存地址/文件功能 ---
 document.getElementById('save-btn').onclick = () => {
-    const data = allComponents.map(m => ({
+    const pathValue = document.getElementById('save-path').value;
+    if (!pathValue) return alert("请在上方输入文件名或地址");
+
+    const layoutData = allComponents.map(m => ({
         name: m.userData.cnName,
-        pos: m.position,
-        rot: m.rotation,
-        sca: m.scale
+        position: m.position,
+        rotation: { x: m.rotation.x, y: m.rotation.y, z: m.rotation.z },
+        scale: m.scale
     }));
-    localStorage.setItem('layout_save_v2', JSON.stringify(data));
-    alert('所有构件位置已保存');
+
+    const jsonContent = JSON.stringify(layoutData, null, 2);
+
+    // 判断是 URL 还是 文件名
+    if (pathValue.startsWith('http')) {
+        // 方案 A：发送到服务器地址 (API)
+        fetch(pathValue, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: jsonContent
+        })
+        .then(res => alert('已尝试发送到服务器地址'))
+        .catch(err => alert('服务器保存失败: ' + err.message));
+    } else {
+        // 方案 B：保存为本地文件下载
+        const blob = new Blob([jsonContent], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+        link.href = url;
+        link.download = pathValue.endsWith('.json') ? pathValue : pathValue + ".json";
+        link.click();
+        URL.revokeObjectURL(url);
+        alert('配置已作为文件下载：' + link.download);
+    }
 };
 
+// 其他按钮
 document.getElementById('undo-btn').onclick = () => {
     if (historyStack.length === 0) return;
     const last = historyStack.pop();
     last.forEach(item => {
-        const target = allComponents.find(m => m.uuid === item.uuid);
+        const target = allComponents.find(m => m.userData.cnName === item.name);
         if (target) {
             target.position.copy(item.pos);
             target.rotation.copy(item.rot);
@@ -220,15 +220,9 @@ document.getElementById('undo-btn').onclick = () => {
 
 document.getElementById('reset-btn').onclick = () => {
     if(!confirm('确定重置吗？')) return;
-    allComponents.forEach(m => {
-        m.position.set(0, 0, 0);
-        m.rotation.set(0, 0, 0);
-        m.scale.set(1, 1, 1);
-    });
-    localStorage.removeItem('layout_save_v2');
+    allComponents.forEach(m => { m.position.set(0,0,0); m.rotation.set(0,0,0); m.scale.set(1,1,1); });
 };
 
-// 操作按钮
 const step = 0.2;
 document.getElementById('up-btn').onclick = () => { if(currentSelected){ recordState(); currentSelected.position.y += step; } };
 document.getElementById('down-btn').onclick = () => { if(currentSelected){ recordState(); currentSelected.position.y -= step; } };
@@ -236,18 +230,14 @@ document.getElementById('rotate-btn').onclick = () => { if(currentSelected){ rec
 document.getElementById('plus-btn').onclick = () => { if(currentSelected){ recordState(); currentSelected.scale.multiplyScalar(1.1); } };
 document.getElementById('minus-btn').onclick = () => { if(currentSelected){ recordState(); currentSelected.scale.divideScalar(1.1); } };
 
-// --- 环境与渲染 ---
+// 灯光渲染
 scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 const sun = new THREE.DirectionalLight(0xffffff, 0.8);
 sun.position.set(5, 10, 7);
 scene.add(sun);
 scene.add(new THREE.GridHelper(20, 20, 0x444444, 0x222222));
 
-function animate() {
-    requestAnimationFrame(animate);
-    controls.update();
-    renderer.render(scene, camera);
-}
+function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene, camera); }
 animate();
 
 window.onresize = () => {
