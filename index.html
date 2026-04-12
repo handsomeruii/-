@@ -3,47 +3,41 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>3D构件全向移动版</title>
+  <title>3D构件全功能版</title>
   <style>
     * { touch-action: none; -webkit-tap-highlight-color: transparent; }
     body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: sans-serif; }
     canvas { display: block; }
 
-    /* 顶部提示 */
-    .ui-tips {
-      position: absolute; top: 10px; width: 100%; text-align: center;
-      color: #aaa; font-size: 12px; pointer-events: none;
-    }
+    /* UI 样式保持一致 */
+    .ui-tips { position: absolute; top: 10px; width: 100%; text-align: center; color: #aaa; font-size: 12px; pointer-events: none; z-index: 10; }
+    #select-tag { position: absolute; top: 40px; left: 50%; transform: translateX(-50%); background: #ff3b30; color: white; padding: 4px 12px; border-radius: 15px; font-size: 12px; display: none; z-index: 10; }
 
-    /* 右侧控制组 */
-    .control-box {
-      position: absolute; bottom: 30px; right: 20px;
-      display: flex; flex-direction: column; gap: 12px;
-    }
+    /* 右侧控制组：操作类 */
+    .control-box { position: absolute; bottom: 30px; right: 20px; display: flex; flex-direction: column; gap: 10px; }
+    
+    /* 左侧控制组：系统类（撤回、保存、重置） */
+    .system-box { position: absolute; bottom: 30px; left: 20px; display: flex; flex-direction: column; gap: 10px; }
 
     .btn {
-      width: 50px; height: 50px;
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 12px; color: white; font-size: 20px;
-      display: flex; flex-direction: column; align-items: center; justify-content: center;
-      backdrop-filter: blur(10px);
+      width: 50px; height: 50px; background: rgba(255, 255, 255, 0.1); border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 12px; color: white; font-size: 18px; display: flex; flex-direction: column; align-items: center; justify-content: center; backdrop-filter: blur(10px);
     }
     .btn span { font-size: 10px; margin-top: 2px; }
-    .btn:active { background: #ff3b30; }
-
-    /* 选中提示标签 */
-    #select-tag {
-      position: absolute; top: 40px; left: 50%; transform: translateX(-50%);
-      background: #ff3b30; color: white; padding: 4px 12px;
-      border-radius: 15px; font-size: 12px; display: none;
-    }
+    .btn:active { background: #ff3b30; transform: scale(0.95); }
+    .btn-sys { background: rgba(0, 122, 255, 0.3); } /* 系统按钮蓝色区分 */
   </style>
 </head>
 <body>
 
-<div class="ui-tips">拖拽：前后左右 | 按钮：升降、旋转、缩放</div>
+<div class="ui-tips">左侧：系统功能 | 右侧：构件操作</div>
 <div id="select-tag">已选中构件</div>
+
+<div class="system-box">
+  <div class="btn btn-sys" id="undo-btn">↶<span>撤回</span></div>
+  <div class="btn btn-sys" id="save-btn">💾<span>保存</span></div>
+  <div class="btn btn-sys" id="reset-btn">🔄<span>重置</span></div>
+</div>
 
 <div class="control-box">
   <div class="btn" id="up-btn">▲<span>升</span></div>
@@ -69,7 +63,14 @@ import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { DragControls } from 'three/examples/jsm/controls/DragControls.js';
 
-// --- 场景初始化 ---
+// --- 核心变量 ---
+const allModels = [];
+const activeSelection = [];
+let currentObj = null;
+const historyStack = []; // 撤回堆栈
+const initialData = []; // 记录初始位置
+
+// --- 场景设置 ---
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x1a1a1a);
 const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
@@ -84,98 +85,141 @@ document.body.appendChild(renderer.domElement);
 const controls = new OrbitControls(camera, renderer.domElement);
 controls.enableDamping = true;
 
-const allModels = [];
-const activeSelection = [];
-let currentObj = null;
+// --- 核心逻辑：记录状态 (用于撤回) ---
+function recordState() {
+    const state = allModels.map(m => ({
+        uuid: m.uuid,
+        pos: m.position.clone(),
+        rot: m.rotation.clone(),
+        sca: m.scale.clone()
+    }));
+    historyStack.push(state);
+    if (historyStack.length > 20) historyStack.shift(); // 最多支持20步撤回
+}
 
-// --- 拖拽逻辑 (左右前后) ---
+// --- 拖拽逻辑 ---
 const dragControls = new DragControls(activeSelection, camera, renderer.domElement);
-dragControls.transformGroup = true;
-
-dragControls.addEventListener('dragstart', () => controls.enabled = false);
+dragControls.addEventListener('dragstart', () => {
+    recordState(); // 开始拖拽前记录状态
+    controls.enabled = false;
+});
 dragControls.addEventListener('dragend', () => controls.enabled = true);
 dragControls.addEventListener('drag', (e) => {
-    // 自动吸附对齐 (0.2米为单位)
     const s = 0.2;
     e.object.position.x = Math.round(e.object.position.x / s) * s;
     e.object.position.z = Math.round(e.object.position.z / s) * s;
-    // 注意：这里不再强制 y=0，允许保留之前调整的高度
 });
 
-// --- 点击选中逻辑 ---
+// --- 点击选中 ---
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
-
 renderer.domElement.addEventListener('touchstart', (e) => {
     const touch = e.touches[0];
     mouse.x = (touch.clientX / window.innerWidth) * 2 - 1;
     mouse.y = -(touch.clientY / window.innerHeight) * 2 + 1;
-    
     raycaster.setFromCamera(mouse, camera);
     const hits = raycaster.intersectObjects(allModels, true);
-
     if (hits.length > 0) {
         let obj = hits[0].object;
         while (obj.parent && !allModels.includes(obj)) obj = obj.parent;
-        
         if (allModels.includes(obj)) {
             activeSelection.length = 0;
             activeSelection.push(obj);
             currentObj = obj;
-            // 变色反馈
             allModels.forEach(m => m.traverse(c => c.isMesh && c.material.emissive?.set(0x000000)));
             obj.traverse(c => c.isMesh && c.material.emissive?.set(0x331111));
             document.getElementById('select-tag').style.display = 'block';
         }
-    } else {
-        if (!e.target.closest('.btn')) {
-            activeSelection.length = 0;
-            currentObj = null;
-            allModels.forEach(m => m.traverse(c => c.isMesh && c.material.emissive?.set(0x000000)));
-            document.getElementById('select-tag').style.display = 'none';
-        }
+    } else if (!e.target.closest('.btn')) {
+        currentObj = null;
+        activeSelection.length = 0;
+        allModels.forEach(m => m.traverse(c => c.isMesh && c.material.emissive?.set(0x000000)));
+        document.getElementById('select-tag').style.display = 'none';
     }
 }, { passive: true });
 
-// --- 按钮功能：升降、旋转、缩放 ---
-const step = 0.2; // 每次移动/缩放的幅度
+// --- 功能按钮实现 ---
 
-document.getElementById('up-btn').onclick = () => {
-    if (currentObj) currentObj.position.y += step;
-};
-document.getElementById('down-btn').onclick = () => {
-    if (currentObj) currentObj.position.y -= step;
-};
-document.getElementById('rotate-btn').onclick = () => {
-    if (currentObj) currentObj.rotation.y += Math.PI / 2;
-};
-document.getElementById('plus-btn').onclick = () => {
-    if (currentObj) currentObj.scale.multiplyScalar(1.1);
-};
-document.getElementById('minus-btn').onclick = () => {
-    if (currentObj) currentObj.scale.divideScalar(1.1);
-};
-
-// --- 模型加载 ---
-const loader = new GLTFLoader();
-const load = (url, x, z) => {
-    loader.load(url, (gltf) => {
-        const m = gltf.scene;
-        // 初始落地位置
-        const b = new THREE.Box3().setFromObject(m);
-        m.position.set(x, -b.min.y, z);
-        scene.add(m);
-        allModels.push(m);
+// 1. 撤回
+document.getElementById('undo-btn').onclick = () => {
+    if (historyStack.length === 0) return;
+    const lastState = historyStack.pop();
+    lastState.forEach(saved => {
+        const model = allModels.find(m => m.uuid === saved.uuid);
+        if (model) {
+            model.position.copy(saved.pos);
+            model.rotation.copy(saved.rot);
+            model.scale.copy(saved.sca);
+        }
     });
 };
 
-// 请修改为你对应的英文文件名
-load('./model/1.glb', 0, 0);
-load('./model/wall.glb', 0, 0);
-load('./model/pillar.glb', 0, 0);
-load('./model/dougong.glb', 0, 0);
+// 2. 保存到本地缓存
+document.getElementById('save-btn').onclick = () => {
+    const data = allModels.map(m => ({
+        name: m.userData.name,
+        pos: m.position,
+        rot: m.rotation,
+        sca: m.scale
+    }));
+    localStorage.setItem('3d_layout_save', JSON.stringify(data));
+    alert('进度已保存到手机本地');
+};
 
-// --- 辅助线与灯光 ---
+// 3. 一键重置
+document.getElementById('reset-btn').onclick = () => {
+    if(!confirm('确定要重置所有构件位置吗？')) return;
+    allModels.forEach((m, index) => {
+        const init = initialData[index];
+        m.position.copy(init.pos);
+        m.rotation.copy(init.rot);
+        m.scale.copy(init.sca);
+    });
+    historyStack.length = 0;
+};
+
+// 操作类按钮 (点击前先记录状态)
+const step = 0.2;
+document.getElementById('up-btn').onclick = () => { if(currentObj) { recordState(); currentObj.position.y += step; } };
+document.getElementById('down-btn').onclick = () => { if(currentObj) { recordState(); currentObj.position.y -= step; } };
+document.getElementById('rotate-btn').onclick = () => { if(currentObj) { recordState(); currentObj.rotation.y += Math.PI/2; } };
+document.getElementById('plus-btn').onclick = () => { if(currentObj) { recordState(); currentObj.scale.multiplyScalar(1.1); } };
+document.getElementById('minus-btn').onclick = () => { if(currentObj) { recordState(); currentObj.scale.divideScalar(1.1); } };
+
+// --- 模型加载与恢复 ---
+const loader = new GLTFLoader();
+const load = (url, x, z, name) => {
+    loader.load(url, (gltf) => {
+        const m = gltf.scene;
+        m.userData.name = name; // 用于保存匹配
+        const b = new THREE.Box3().setFromObject(m);
+        m.position.set(x, -b.min.y, z);
+        
+        // 记录初始状态
+        initialData.push({ pos: m.position.clone(), rot: m.rotation.clone(), sca: m.scale.clone() });
+        
+        scene.add(m);
+        allModels.push(m);
+
+        // 加载完成后尝试恢复保存的数据
+        const savedData = JSON.parse(localStorage.getItem('3d_layout_save'));
+        if (savedData) {
+            const mySave = savedData.find(s => s.name === name);
+            if (mySave) {
+                m.position.copy(mySave.pos);
+                m.rotation.set(mySave.rot._x, mySave.rot._y, mySave.rot._z);
+                m.scale.copy(mySave.sca);
+            }
+        }
+    });
+};
+
+load('./model/1.glb', 0, 0, 'roof');
+load('./model/wall.glb', 0, 0, 'wall');
+load('./model/pillar.glb', 0, 0, 'pillar');
+load('./model/dougong.glb', 0, 0, 'dougong');
+
+// --- 灯光与渲染循环 ---
 scene.add(new THREE.AmbientLight(0xffffff, 1.5));
 const light = new THREE.DirectionalLight(0xffffff, 1);
 light.position.set(5, 10, 5);
