@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-  <title>3D构件整体控制-带导出版</title>
+  <title>3D构件整体控制-保存与读取版</title>
   <style>
     * { touch-action: none; -webkit-tap-highlight-color: transparent; }
     body { margin: 0; overflow: hidden; background-color: #1a1a1a; font-family: sans-serif; }
@@ -12,7 +12,7 @@
     /* UI 顶部提示 */
     .ui-tips { position: absolute; top: 10px; width: 100%; text-align: center; color: #aaa; font-size: 11px; pointer-events: none; z-index: 10; }
     
-    /* 核心：地址输入框 */
+    /* 顶部地址/文件名栏 */
     .address-bar {
       position: absolute; top: 40px; left: 10px; right: 10px;
       display: flex; gap: 5px; z-index: 20;
@@ -39,20 +39,27 @@
     }
     .btn span { font-size: 10px; margin-top: 2px; }
     .btn-sys { background: rgba(0, 122, 255, 0.3); } 
+    .btn-open { background: rgba(255, 152, 0, 0.4); } /* 橙色区分打开按钮 */
     .btn:active { transform: scale(0.9); background: #ff3b30; }
+
+    /* 隐藏的文件输入框 */
+    #file-input { display: none; }
   </style>
 </head>
 <body>
 
-<div class="ui-tips">输入文件名保存到本地 | 或输入 URL 发送到服务器</div>
+<div class="ui-tips">保存：下载JSON文件 | 打开：选择本地JSON文件恢复</div>
 
 <div class="address-bar">
-  <input type="text" id="save-path" placeholder="输入保存文件名 (如: 我的屋顶1)" value="my_3d_project">
+  <input type="text" id="save-path" placeholder="输入保存的文件名" value="我的建筑设计_1">
 </div>
 
 <div id="select-tag">已选中：构件整体</div>
 
+<input type="file" id="file-input" accept=".json">
+
 <div class="system-box">
+  <div class="btn btn-sys btn-open" id="open-btn">📂<span>打开</span></div>
   <div class="btn btn-sys" id="undo-btn">↶<span>撤回</span></div>
   <div class="btn btn-sys" id="save-btn">💾<span>保存</span></div>
   <div class="btn btn-sys" id="reset-btn">🔄<span>重置</span></div>
@@ -120,7 +127,7 @@ dragControls.transformGroup = true;
 dragControls.addEventListener('dragstart', () => { recordState(); controls.enabled = false; });
 dragControls.addEventListener('dragend', () => controls.enabled = true);
 
-// --- 点击选中 (向上追溯根节点) ---
+// --- 点击选中 ---
 const raycaster = new THREE.Raycaster();
 const mouse = new THREE.Vector2();
 
@@ -167,44 +174,60 @@ loadComponent('./model/wall.glb', '墙体整体');
 loadComponent('./model/pillar.glb', '柱子整体');
 loadComponent('./model/dougong.glb', '斗拱整体');
 
-// --- 核心修改：保存地址/文件功能 ---
+// --- 功能1：保存到文件 ---
 document.getElementById('save-btn').onclick = () => {
-    const pathValue = document.getElementById('save-path').value;
-    if (!pathValue) return alert("请在上方输入文件名或地址");
-
+    const fileName = document.getElementById('save-path').value || "未命名设计";
     const layoutData = allComponents.map(m => ({
         name: m.userData.cnName,
-        position: m.position,
-        rotation: { x: m.rotation.x, y: m.rotation.y, z: m.rotation.z },
-        scale: m.scale
+        pos: { x: m.position.x, y: m.position.y, z: m.position.z },
+        rot: { x: m.rotation.x, y: m.rotation.y, z: m.rotation.z },
+        sca: { x: m.scale.x, y: m.scale.y, z: m.scale.z }
     }));
 
-    const jsonContent = JSON.stringify(layoutData, null, 2);
-
-    // 判断是 URL 还是 文件名
-    if (pathValue.startsWith('http')) {
-        // 方案 A：发送到服务器地址 (API)
-        fetch(pathValue, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: jsonContent
-        })
-        .then(res => alert('已尝试发送到服务器地址'))
-        .catch(err => alert('服务器保存失败: ' + err.message));
-    } else {
-        // 方案 B：保存为本地文件下载
-        const blob = new Blob([jsonContent], { type: 'application/json' });
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.download = pathValue.endsWith('.json') ? pathValue : pathValue + ".json";
-        link.click();
-        URL.revokeObjectURL(url);
-        alert('配置已作为文件下载：' + link.download);
-    }
+    const blob = new Blob([JSON.stringify(layoutData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = fileName + ".json";
+    link.click();
+    URL.revokeObjectURL(url);
+    alert('保存成功！文件已存入下载文件夹。');
 };
 
-// 其他按钮
+// --- 功能2：打开并读取文件 ---
+const fileInput = document.getElementById('file-input');
+document.getElementById('open-btn').onclick = () => fileInput.click();
+
+fileInput.onchange = (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+        try {
+            const data = JSON.parse(event.target.result);
+            recordState(); // 加载前记录状态，方便撤回
+            
+            data.forEach(savedItem => {
+                // 根据名称匹配场景中的构件
+                const component = allComponents.find(m => m.userData.cnName === savedItem.name);
+                if (component) {
+                    component.position.set(savedItem.pos.x, savedItem.pos.y, savedItem.pos.z);
+                    component.rotation.set(savedItem.rot.x, savedItem.rot.y, savedItem.rot.z);
+                    component.scale.set(savedItem.sca.x, savedItem.sca.y, savedItem.sca.z);
+                }
+            });
+            alert('读取成功！已恢复建筑布局。');
+        } catch (err) {
+            alert('读取失败：文件格式不正确');
+            console.error(err);
+        }
+        fileInput.value = ""; // 清空，方便下次选择同名文件
+    };
+    reader.readAsText(file);
+};
+
+// --- 其他控制按钮 ---
 document.getElementById('undo-btn').onclick = () => {
     if (historyStack.length === 0) return;
     const last = historyStack.pop();
@@ -219,7 +242,7 @@ document.getElementById('undo-btn').onclick = () => {
 };
 
 document.getElementById('reset-btn').onclick = () => {
-    if(!confirm('确定重置吗？')) return;
+    if(!confirm('确定重置所有构件吗？')) return;
     allComponents.forEach(m => { m.position.set(0,0,0); m.rotation.set(0,0,0); m.scale.set(1,1,1); });
 };
 
@@ -230,7 +253,7 @@ document.getElementById('rotate-btn').onclick = () => { if(currentSelected){ rec
 document.getElementById('plus-btn').onclick = () => { if(currentSelected){ recordState(); currentSelected.scale.multiplyScalar(1.1); } };
 document.getElementById('minus-btn').onclick = () => { if(currentSelected){ recordState(); currentSelected.scale.divideScalar(1.1); } };
 
-// 灯光渲染
+// --- 渲染循环 ---
 scene.add(new THREE.AmbientLight(0xffffff, 1.2));
 const sun = new THREE.DirectionalLight(0xffffff, 0.8);
 sun.position.set(5, 10, 7);
